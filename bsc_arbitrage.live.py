@@ -5,7 +5,7 @@ Supports BSC Mainnet/Testnet and other EVM chains
 WITH DATABASE LOGGING AND SPREAD CALCULATIONS
 V2 ROUTERS ONLY
 ALWAYS FETCHES PRICES FROM MAINNET
-WITH PROPER NET PROFIT CALCULATIONS
+WITH PROPER NET PROFIT CALCULATIONS - FIXED
 """
 import time
 import json
@@ -36,11 +36,17 @@ except ImportError:
 FLASH_LOAN_FEE_PCT = 0.0009  # 0.09% flash loan fee
 GAS_COST_USD = 0.08  # Estimated gas cost in USD
 
+# === DEX FEE CONFIGURATION (CRITICAL - MUST MATCH DEMO) ===
+DEX_FEES = {
+    "pancakeswap": 0.0025,  # 0.25%
+    "biswap": 0.001,        # 0.1%
+}
+
 # === TRADING CONFIGURATION ===
 TRADING_CONFIG = {
     "borrow_token": "BUSD",      # Token to borrow via flash loan
     "trade_token": "WBNB",       # Token to trade/intermediate token
-    "borrow_amount": 100,         # Amount to borrow (in whole tokens)
+    "borrow_amount": 1000,       # Amount to borrow (in whole tokens) - INCREASED TO MATCH DEMO
     "min_profit": 0.01,          # Minimum NET profit required (in borrowed token)
 }
 
@@ -312,7 +318,10 @@ class ArbitrageBot:
         token_intermediate: str,
         borrow_amount: int,
     ) -> Optional[Dict]:
-        """Find best arbitrage opportunity using MAINNET prices"""
+        """
+        Find best arbitrage opportunity using MAINNET prices
+        FIXED: Now properly matches the demo calculation logic with DEX fees
+        """
         # Use MAINNET token addresses for price checking
         mainnet_token_borrow = self.mainnet_tokens.get(TRADING_CONFIG["borrow_token"])
         mainnet_token_intermediate = self.mainnet_tokens.get(TRADING_CONFIG["trade_token"])
@@ -349,32 +358,49 @@ class ArbitrageBot:
                     spread = ((prices[router2] - prices[router1]) / prices[router1]) * 100
                     spreads[f"{router1}_to_{router2}"] = spread
         
-        # Calculate flash loan fee
+        # ====== CRITICAL FIX: Match demo calculation logic ======
+        # Calculate flash loan fee (deducted AFTER trading, not before)
         flash_loan_fee = int(borrow_amount * FLASH_LOAN_FEE_PCT)
         
         # Calculate gas cost in borrow token (assuming BUSD ~= $1)
         gas_cost_tokens = self.w3.to_wei(GAS_COST_USD, 'ether')
         
-        # Find best arbitrage opportunity using actual trade amounts
+        # Find best arbitrage opportunity
+        # This simulates: Borrow BUSD -> Buy WBNB (with fee) -> Sell WBNB (with fee) -> Return BUSD
         for buy_router in router_names:
             for sell_router in router_names:
                 if buy_router == sell_router:
                     continue  # Skip same router
                 
-                # Get buy price (MAINNET) - BUSD -> WBNB
-                intermediate_amount = self.get_mainnet_price(buy_router, borrow_amount, path_buy)
-                if not intermediate_amount:
+                # Get DEX fees
+                buy_fee = DEX_FEES.get(buy_router, 0.003)  # Default 0.3% if unknown
+                sell_fee = DEX_FEES.get(sell_router, 0.003)
+                
+                # Step 1: Buy WBNB with borrowed BUSD
+                # Router returns the amount before DEX fee
+                intermediate_amount_raw = self.get_mainnet_price(buy_router, borrow_amount, path_buy)
+                if not intermediate_amount_raw:
                     continue
                 
-                # Get sell price (MAINNET) - WBNB -> BUSD
-                final_amount = self.get_mainnet_price(sell_router, intermediate_amount, path_sell)
-                if not final_amount:
+                # Apply buy fee (DEX takes fee, we get less tokens)
+                # tokens_bought = (capital / price_buy) * (1 - buy_fee)
+                intermediate_amount = int(intermediate_amount_raw * (1 - buy_fee))
+                
+                # Step 2: Sell WBNB back to BUSD
+                # Router returns amount before DEX fee
+                final_amount_raw = self.get_mainnet_price(sell_router, intermediate_amount, path_sell)
+                if not final_amount_raw:
                     continue
                 
-                # Calculate gross profit (before fees)
+                # Apply sell fee (DEX takes fee, we get less BUSD back)
+                # usd_return = tokens_after_sell_fee * price_sell
+                final_amount = int(final_amount_raw * (1 - sell_fee))
+                
+                # Calculate profits exactly like demo:
+                # gross_profit = usd_return - flash_loan_amount
                 gross_profit = final_amount - borrow_amount
                 
-                # Calculate net profit (after all fees)
+                # net_profit = gross_profit - flash_loan_fee - gas_cost
                 net_profit = gross_profit - flash_loan_fee - gas_cost_tokens
                 
                 if net_profit > best_net_profit:
@@ -398,6 +424,8 @@ class ArbitrageBot:
                         "path_sell": [token_intermediate, token_borrow],  # Execution network tokens
                         "prices": prices,
                         "spreads": spreads,
+                        "buy_fee": buy_fee,
+                        "sell_fee": sell_fee,
                     }
         
         # ALWAYS return prices and spreads, even if no profitable opportunity
@@ -498,7 +526,7 @@ class ArbitrageBot:
         """Main bot loop"""
         print(f"\n{Colors.CYAN}{Colors.BOLD}{'=' * 70}")
         print("FLASH LOAN ARBITRAGE BOT - LIVE EXECUTION (V2 ONLY)")
-        print("WITH NET PROFIT CALCULATIONS")
+        print("WITH NET PROFIT CALCULATIONS - FIXED VERSION")
         print(f"{'=' * 70}{Colors.END}\n")
         
         print(f"{Colors.BLUE}Configuration:{Colors.END}")
@@ -515,6 +543,7 @@ class ArbitrageBot:
         print(f"  Dry Run:           {'Yes' if self.dry_run else 'NO - LIVE EXECUTION'}")
         print(f"  Database Logging:  {'✓ Enabled' if self.db else '✗ Disabled'}")
         print(f"  DEX Routers:       {list(self.mainnet_routers.keys())}")
+        print(f"  DEX Fees:          PancakeSwap: {DEX_FEES['pancakeswap']*100}%, BiSwap: {DEX_FEES['biswap']*100}%")
         
         balance = self.get_balance()
         print(f"  Balance:           {balance:.4f} BNB/ETH\n")
@@ -598,7 +627,7 @@ class ArbitrageBot:
                     
                     # Show profit analysis for this scan (ALWAYS, even if below threshold)
                     print(f"\n  {Colors.CYAN}Profit Analysis:{Colors.END}")
-                    if current_gross_profit > 0:
+                    if current_gross_profit > 0 or current_net_profit != 0:
                         gross_display = self.w3.from_wei(current_gross_profit, 'ether')
                         flash_fee_display = self.w3.from_wei(opp.get("flash_loan_fee", 0), 'ether')
                         gas_cost_display = self.w3.from_wei(opp.get("gas_cost", 0), 'ether')
@@ -652,6 +681,11 @@ class ArbitrageBot:
                     if buy_price and sell_price:
                         opp_spread = ((sell_price - buy_price) / buy_price) * 100
                         print(f"    Spread:        {Colors.YELLOW}{opp_spread:.4f}%{Colors.END}")
+                    
+                    # Show DEX fees used
+                    if 'buy_fee' in opp and 'sell_fee' in opp:
+                        print(f"    Buy DEX Fee:   {opp['buy_fee']*100}%")
+                        print(f"    Sell DEX Fee:  {opp['sell_fee']*100}%")
                     
                     print(f"{Colors.CYAN}{'=' * 70}{Colors.END}")
                     
@@ -739,7 +773,7 @@ class ArbitrageBot:
 def main():
     print(f"\n{Colors.CYAN}{Colors.BOLD}{'=' * 70}")
     print("FLASH LOAN ARBITRAGE BOT")
-    print("Live Execution with Net Profit Calculation (V2 Only)")
+    print("Live Execution with Net Profit Calculation (V2 Only) - FIXED")
     print(f"{'=' * 70}{Colors.END}\n")
     
     if not WEB3_AVAILABLE:
