@@ -296,7 +296,7 @@ def main():
             
             if not prices:
                 log("Failed to fetch prices, retrying...", Colors.YELLOW)
-                time.sleep(3)
+                time.sleep(10)
                 continue
             
             pancake = prices["pancakeswap"]

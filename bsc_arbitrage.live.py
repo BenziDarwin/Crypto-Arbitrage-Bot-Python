@@ -16,7 +16,7 @@ from typing import Optional, Dict, Tuple
 from decimal import Decimal
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(".env.live")
 
 try:
     from web3 import Web3
@@ -783,7 +783,7 @@ def main():
     borrow_amount = bot.w3.to_wei(TRADING_CONFIG["borrow_amount"], "ether")
     min_profit = bot.w3.to_wei(TRADING_CONFIG["min_profit"], "ether")
     
-    bot.run(token_borrow, token_intermediate, borrow_amount, min_profit,interval=10)
+    bot.run(token_borrow, token_intermediate, borrow_amount, min_profit, interval=10)
 
 
 if __name__ == "__main__":
