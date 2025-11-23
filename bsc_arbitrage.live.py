@@ -521,10 +521,10 @@ class ArbitrageBot:
         
         if not self.dry_run:
             print(f"{Colors.RED}{Colors.BOLD}⚠️  LIVE MODE - Real transactions will be sent!{Colors.END}")
-            confirm = input("Type 'CONFIRM' to proceed: ")
-            if confirm != "CONFIRM":
-                log("Aborted by user", Colors.YELLOW)
-                return
+            # confirm = input("Type 'CONFIRM' to proceed: ")
+            # if confirm != "CONFIRM":
+            #     log("Aborted by user", Colors.YELLOW)
+            #     return
         
         log("Starting arbitrage bot...", Colors.GREEN)
         
