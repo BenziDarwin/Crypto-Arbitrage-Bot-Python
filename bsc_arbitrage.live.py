@@ -2,7 +2,10 @@
 Flash Loan Arbitrage Bot - Live Execution Version
 Uses deployed FlashLoanArbitrage contract for real trades
 Supports BSC Mainnet/Testnet and other EVM chains
-WITH DATABASE LOGGING
+WITH DATABASE LOGGING AND SPREAD CALCULATIONS
+V2 ROUTERS ONLY
+ALWAYS FETCHES PRICES FROM MAINNET
+WITH PROPER NET PROFIT CALCULATIONS
 """
 import time
 import json
@@ -23,13 +26,25 @@ except ImportError:
     print("⚠️  Web3.py not installed. Install with: pip install web3")
 
 try:
-    from database import ArbitrageDatabase
+    from database_live import ArbitrageDatabase
     DATABASE_AVAILABLE = True
 except ImportError:
     DATABASE_AVAILABLE = False
     print("⚠️  Database module not found. Running without database logging.")
 
-# === CONFIGURATION ===
+# === FEE CONFIGURATION ===
+FLASH_LOAN_FEE_PCT = 0.0009  # 0.09% flash loan fee
+GAS_COST_USD = 0.08  # Estimated gas cost in USD
+
+# === TRADING CONFIGURATION ===
+TRADING_CONFIG = {
+    "borrow_token": "BUSD",      # Token to borrow via flash loan
+    "trade_token": "WBNB",       # Token to trade/intermediate token
+    "borrow_amount": 100,         # Amount to borrow (in whole tokens)
+    "min_profit": 0.01,          # Minimum NET profit required (in borrowed token)
+}
+
+# === NETWORK CONFIGURATION ===
 NETWORK = os.getenv("NETWORK", "bsc_testnet")
 
 NETWORKS = {
@@ -50,7 +65,7 @@ NETWORKS = {
     },
 }
 
-# === CONTRACT ADDRESSES (UPDATE THESE) ===
+# === CONTRACT ADDRESSES ===
 CONTRACT_CONFIG = {
     "bsc_mainnet": {
         "arbitrage": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
@@ -59,9 +74,6 @@ CONTRACT_CONFIG = {
             "pancakeswap": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
             "biswap": "0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8",
         },
-        "v3_routers": {
-            "pancakeswap_v3": "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",
-        },
         "tokens": {
             "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
             "BUSD": "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56",
@@ -69,15 +81,16 @@ CONTRACT_CONFIG = {
         },
     },
     "bsc_testnet": {
-        "arbitrage": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
-        "dodo_pool": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
+        "arbitrage": "0xd78f4b1452e9314096e711ce3efe7c00d5612cdf",
+        "dodo_pool": "0x0df90e293e2cf231f93736a0d46b1df59086834a",
         "v2_routers": {
-            "pancakeswap": "0xD99D1c33F9fC3444f8101754aBC46c52416550D1",
+            "pancakeswap": "0x5ffb2e1aa043bfee7cca97f0178d24fbe38e9575",
+            "biswap": "0xcecb74ac39d184fb1ee5915783f3f8c88366e70c",
         },
-        "v3_routers": {},
         "tokens": {
-            "WBNB": "0xae13d989daC2f0dEbFf460aC112a837C89BAa7cd",
-            "BUSD": "0x78867BbEeF44f2326bF8DDd1941a4439382EF2A7",
+            "WBNB": "0xa77e9383370472e84ab89196a83c0c33f295c95b",
+            "BUSD": "0x142f562e6c384777195bcf76fd7df360808d0a89",
+            "USDT": "0x8a9424745056eb399fd19a0ec26a14316684e274",
         },
     },
     "localhost": {
@@ -85,9 +98,6 @@ CONTRACT_CONFIG = {
         "dodo_pool": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
         "v2_routers": {
             "router_v2": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
-        },
-        "v3_routers": {
-            "router_v3": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
         },
         "tokens": {
             "TokenA": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
@@ -106,6 +116,7 @@ class Colors:
     YELLOW = "\033[93m"
     BLUE = "\033[94m"
     CYAN = "\033[96m"
+    MAGENTA = "\033[95m"
     BOLD = "\033[1m"
     END = "\033[0m"
 
@@ -144,40 +155,57 @@ class ArbitrageBot:
         if not WEB3_AVAILABLE:
             raise ImportError("Web3.py is required")
         
-        # Connect to network
+        # Connect to execution network (where we submit transactions)
         net_config = NETWORKS.get(network)
         if not net_config:
             raise ValueError(f"Unknown network: {network}")
         
         self.w3 = Web3(Web3.HTTPProvider(net_config["rpc"]))
 
-        # Add PoA middleware for BSC (handles extraData field > 32 bytes)
+        # Add PoA middleware for BSC
         if "bsc" in network:
             try:
-                # Web3.py v6+
                 from web3.middleware import ExtraDataToPOAMiddleware
                 self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
             except ImportError:
                 try:
-                    # Web3.py v5
                     from web3.middleware import geth_poa_middleware
                     self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
                 except ImportError:
-                    # Skip if neither available
                     log("PoA middleware not available, continuing anyway...", Colors.YELLOW)
                 
-                if not self.w3.is_connected():
-                    raise ConnectionError(f"Failed to connect to {network}")
+        if not self.w3.is_connected():
+            raise ConnectionError(f"Failed to connect to {network}")
         
-        log(f"Connected to {network}", Colors.GREEN)
+        log(f"✓ Connected to {network} (execution)", Colors.GREEN)
+        
+        # ALWAYS connect to mainnet for price fetching
+        mainnet_config = NETWORKS.get("bsc_mainnet")
+        self.w3_mainnet = Web3(Web3.HTTPProvider(mainnet_config["rpc"]))
+        
+        try:
+            from web3.middleware import ExtraDataToPOAMiddleware
+            self.w3_mainnet.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        except ImportError:
+            try:
+                from web3.middleware import geth_poa_middleware
+                self.w3_mainnet.middleware_onion.inject(geth_poa_middleware, layer=0)
+            except ImportError:
+                pass
+        
+        if not self.w3_mainnet.is_connected():
+            raise ConnectionError("Failed to connect to BSC mainnet for price fetching")
+        
+        log(f"✓ Connected to BSC mainnet (price oracle)", Colors.GREEN)
         
         # Setup account
         self.account = self.w3.eth.account.from_key(private_key)
         self.address = self.account.address
         log(f"Wallet: {self.address}", Colors.CYAN)
         
-        # Load contract config
+        # Load contract configs
         self.config = CONTRACT_CONFIG.get(network, {})
+        self.mainnet_config = CONTRACT_CONFIG.get("bsc_mainnet", {})
         
         # Load ABIs
         log("Loading ABIs...", Colors.BLUE)
@@ -186,37 +214,41 @@ class ArbitrageBot:
         self.erc20_abi = load_abi("ERC20.json")
         log("ABIs loaded successfully", Colors.GREEN)
         
-        # Initialize contracts
+        # Initialize execution contract (on target network)
         self.arbitrage_contract = self.w3.eth.contract(
             address=Web3.to_checksum_address(self.config["arbitrage"]),
             abi=self.arbitrage_abi,
         )
         
-        # Initialize routers
-        self.routers = {}
+        # Initialize EXECUTION routers (on target network - for transactions)
+        self.execution_routers = {}
         for name, addr in self.config.get("v2_routers", {}).items():
-            self.routers[name] = {
+            self.execution_routers[name] = {
                 "contract": self.w3.eth.contract(
                     address=Web3.to_checksum_address(addr),
                     abi=self.router_abi,
                 ),
-                "version": 0,  # V2
+                "version": 0,
                 "address": addr,
             }
-            log(f"  V2 Router loaded: {name}", Colors.CYAN)
+            log(f"  Execution Router loaded: {name} ({network})", Colors.CYAN)
         
-        for name, addr in self.config.get("v3_routers", {}).items():
-            self.routers[name] = {
-                "contract": self.w3.eth.contract(
+        # Initialize MAINNET routers (for price fetching ONLY)
+        self.mainnet_routers = {}
+        for name, addr in self.mainnet_config.get("v2_routers", {}).items():
+            self.mainnet_routers[name] = {
+                "contract": self.w3_mainnet.eth.contract(
                     address=Web3.to_checksum_address(addr),
                     abi=self.router_abi,
                 ),
-                "version": 1,  # V3
+                "version": 0,
                 "address": addr,
             }
-            log(f"  V3 Router loaded: {name}", Colors.CYAN)
+            log(f"  Price Oracle Router: {name} (mainnet)", Colors.BLUE)
         
+        # Token addresses
         self.tokens = self.config.get("tokens", {})
+        self.mainnet_tokens = self.mainnet_config.get("tokens", {})
         
         # Initialize database
         if DATABASE_AVAILABLE:
@@ -256,11 +288,12 @@ class ArbitrageBot:
         decimals = token.functions.decimals().call()
         return balance, decimals
     
-    def get_price(self, router_name: str, amount_in: int, path: list) -> Optional[int]:
-        """Get output amount from router"""
+    def get_mainnet_price(self, router_name: str, amount_in: int, path: list) -> Optional[int]:
+        """Get output amount from MAINNET router (for price oracle)"""
         try:
-            router = self.routers.get(router_name)
+            router = self.mainnet_routers.get(router_name)
             if not router:
+                log(f"Router {router_name} not found", Colors.RED)
                 return None
             
             path_checksum = [Web3.to_checksum_address(addr) for addr in path]
@@ -270,7 +303,7 @@ class ArbitrageBot:
             
             return amounts[-1]
         except Exception as e:
-            log(f"Price fetch error ({router_name}): {e}", Colors.RED)
+            log(f"Mainnet price fetch error ({router_name}): {str(e)[:100]}", Colors.RED)
             return None
     
     def find_arbitrage(
@@ -279,54 +312,115 @@ class ArbitrageBot:
         token_intermediate: str,
         borrow_amount: int,
     ) -> Optional[Dict]:
-        """Find best arbitrage opportunity between routers"""
-        path_buy = [token_borrow, token_intermediate]
-        path_sell = [token_intermediate, token_borrow]
+        """Find best arbitrage opportunity using MAINNET prices"""
+        # Use MAINNET token addresses for price checking
+        mainnet_token_borrow = self.mainnet_tokens.get(TRADING_CONFIG["borrow_token"])
+        mainnet_token_intermediate = self.mainnet_tokens.get(TRADING_CONFIG["trade_token"])
+        
+        if not mainnet_token_borrow or not mainnet_token_intermediate:
+            log("Missing mainnet token configuration", Colors.RED)
+            return None
+        
+        path_buy = [mainnet_token_borrow, mainnet_token_intermediate]
+        path_sell = [mainnet_token_intermediate, mainnet_token_borrow]
         
         best_opportunity = None
-        best_profit = 0
+        best_net_profit = 0
         
-        router_names = list(self.routers.keys())
+        router_names = list(self.mainnet_routers.keys())
         prices = {}
         
-        # Get all prices first (for logging)
-        for router_name in router_names:
-            price = self.get_price(router_name, borrow_amount, path_buy)
-            if price:
-                prices[router_name] = price
+        # Get all prices from MAINNET (for display purposes - WBNB price in BUSD)
+        # Use 1 WBNB (1e18) to get the price per WBNB
+        wbnb_amount = 10**18  # 1 WBNB
+        path_price_check = [mainnet_token_intermediate, mainnet_token_borrow]  # WBNB -> BUSD
         
+        for router_name in router_names:
+            price_output = self.get_mainnet_price(router_name, wbnb_amount, path_price_check)
+            if price_output:
+                # This gives us BUSD per WBNB (the actual BNB price)
+                prices[router_name] = price_output
+        
+        # Calculate spreads between all router pairs
+        spreads = {}
+        for router1 in router_names:
+            for router2 in router_names:
+                if router1 != router2 and router1 in prices and router2 in prices:
+                    spread = ((prices[router2] - prices[router1]) / prices[router1]) * 100
+                    spreads[f"{router1}_to_{router2}"] = spread
+        
+        # Calculate flash loan fee
+        flash_loan_fee = int(borrow_amount * FLASH_LOAN_FEE_PCT)
+        
+        # Calculate gas cost in borrow token (assuming BUSD ~= $1)
+        gas_cost_tokens = self.w3.to_wei(GAS_COST_USD, 'ether')
+        
+        # Find best arbitrage opportunity using actual trade amounts
         for buy_router in router_names:
             for sell_router in router_names:
-                # Get buy price
-                intermediate_amount = self.get_price(buy_router, borrow_amount, path_buy)
+                if buy_router == sell_router:
+                    continue  # Skip same router
+                
+                # Get buy price (MAINNET) - BUSD -> WBNB
+                intermediate_amount = self.get_mainnet_price(buy_router, borrow_amount, path_buy)
                 if not intermediate_amount:
                     continue
                 
-                # Get sell price
-                final_amount = self.get_price(sell_router, intermediate_amount, path_sell)
+                # Get sell price (MAINNET) - WBNB -> BUSD
+                final_amount = self.get_mainnet_price(sell_router, intermediate_amount, path_sell)
                 if not final_amount:
                     continue
                 
-                # Calculate profit (before fees)
-                profit = final_amount - borrow_amount
+                # Calculate gross profit (before fees)
+                gross_profit = final_amount - borrow_amount
                 
-                if profit > best_profit:
-                    best_profit = profit
+                # Calculate net profit (after all fees)
+                net_profit = gross_profit - flash_loan_fee - gas_cost_tokens
+                
+                if net_profit > best_net_profit:
+                    best_net_profit = net_profit
+                    # Map to EXECUTION router addresses
                     best_opportunity = {
                         "buy_router": buy_router,
                         "sell_router": sell_router,
-                        "buy_router_address": self.routers[buy_router]["address"],
-                        "sell_router_address": self.routers[sell_router]["address"],
-                        "buy_router_version": self.routers[buy_router]["version"],
-                        "sell_router_version": self.routers[sell_router]["version"],
+                        "buy_router_address": self.execution_routers[buy_router]["address"],
+                        "sell_router_address": self.execution_routers[sell_router]["address"],
+                        "buy_router_version": 0,
+                        "sell_router_version": 0,
                         "borrow_amount": borrow_amount,
                         "intermediate_amount": intermediate_amount,
                         "final_amount": final_amount,
-                        "gross_profit": profit,
-                        "path_buy": path_buy,
-                        "path_sell": path_sell,
+                        "gross_profit": gross_profit,
+                        "flash_loan_fee": flash_loan_fee,
+                        "gas_cost": gas_cost_tokens,
+                        "net_profit": net_profit,
+                        "path_buy": [token_borrow, token_intermediate],  # Execution network tokens
+                        "path_sell": [token_intermediate, token_borrow],  # Execution network tokens
                         "prices": prices,
+                        "spreads": spreads,
                     }
+        
+        # ALWAYS return prices and spreads, even if no profitable opportunity
+        if not best_opportunity and len(prices) > 0:
+            return {
+                "buy_router": None,
+                "sell_router": None,
+                "buy_router_address": None,
+                "sell_router_address": None,
+                "buy_router_version": 0,
+                "sell_router_version": 0,
+                "borrow_amount": borrow_amount,
+                "intermediate_amount": 0,
+                "final_amount": 0,
+                "gross_profit": 0,
+                "flash_loan_fee": flash_loan_fee,
+                "gas_cost": gas_cost_tokens,
+                "net_profit": 0,
+                "path_buy": [token_borrow, token_intermediate],
+                "path_sell": [token_intermediate, token_borrow],
+                "prices": prices,
+                "spreads": spreads,
+            }
         
         return best_opportunity
     
@@ -341,7 +435,7 @@ class ArbitrageBot:
         path_sell: list,
         min_profit: int,
     ) -> Optional[str]:
-        """Execute V2 arbitrage"""
+        """Execute V2 arbitrage on target network"""
         if self.dry_run:
             log("DRY RUN - Would execute V2 arbitrage:", Colors.YELLOW)
             log(f"  Borrow: {self.w3.from_wei(borrow_amount, 'ether')} tokens", Colors.YELLOW)
@@ -393,74 +487,6 @@ class ArbitrageBot:
             log(f"Execution error: {e}", Colors.RED)
             return None
     
-    def execute_arbitrage_mixed(
-        self,
-        token_borrow: str,
-        borrow_amount: int,
-        is_base: bool,
-        buy_router: str,
-        buy_version: int,
-        sell_router: str,
-        sell_version: int,
-        path_buy: list,
-        path_sell: list,
-        buy_fee: int,
-        sell_fee: int,
-        min_profit: int,
-    ) -> Optional[str]:
-        """Execute mixed V2/V3 arbitrage"""
-        if self.dry_run:
-            log("DRY RUN - Would execute mixed arbitrage:", Colors.YELLOW)
-            log(f"  Buy: {'V3' if buy_version else 'V2'} @ {buy_router[:10]}...", Colors.YELLOW)
-            log(f"  Sell: {'V3' if sell_version else 'V2'} @ {sell_router[:10]}...", Colors.YELLOW)
-            log(f"  Borrow: {self.w3.from_wei(borrow_amount, 'ether')} tokens", Colors.YELLOW)
-            return "DRY_RUN"
-        
-        try:
-            log("Building mixed arbitrage transaction...", Colors.BLUE)
-            
-            tx = self.arbitrage_contract.functions.executeArbitrageMixed(
-                Web3.to_checksum_address(token_borrow),
-                borrow_amount,
-                is_base,
-                Web3.to_checksum_address(buy_router),
-                buy_version,
-                Web3.to_checksum_address(sell_router),
-                sell_version,
-                [Web3.to_checksum_address(t) for t in path_buy],
-                [Web3.to_checksum_address(t) for t in path_sell],
-                buy_fee,
-                sell_fee,
-                min_profit,
-            ).build_transaction({
-                "from": self.address,
-                "gas": 600000,
-                "gasPrice": self.w3.eth.gas_price,
-                "nonce": self.w3.eth.get_transaction_count(self.address),
-            })
-            
-            log("Signing transaction...", Colors.BLUE)
-            signed = self.w3.eth.account.sign_transaction(tx, self.private_key)
-            
-            log("Sending transaction...", Colors.BLUE)
-            tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
-            
-            log(f"TX sent: {tx_hash.hex()}", Colors.GREEN)
-            
-            log("Waiting for confirmation...", Colors.BLUE)
-            receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
-            
-            if receipt["status"] == 1:
-                log(f"✅ Mixed arbitrage successful! Gas used: {receipt['gasUsed']}", Colors.GREEN)
-                return tx_hash.hex()
-            else:
-                log(f"❌ Mixed arbitrage failed (reverted)", Colors.RED)
-                return None
-                
-        except Exception as e:
-            log(f"Execution error: {e}", Colors.RED)
-            return None
-    
     def run(
         self,
         token_borrow: str,
@@ -471,21 +497,27 @@ class ArbitrageBot:
     ):
         """Main bot loop"""
         print(f"\n{Colors.CYAN}{Colors.BOLD}{'=' * 70}")
-        print("FLASH LOAN ARBITRAGE BOT - LIVE EXECUTION")
+        print("FLASH LOAN ARBITRAGE BOT - LIVE EXECUTION (V2 ONLY)")
+        print("WITH NET PROFIT CALCULATIONS")
         print(f"{'=' * 70}{Colors.END}\n")
         
         print(f"{Colors.BLUE}Configuration:{Colors.END}")
-        print(f"  Network:          {self.network}")
-        print(f"  Wallet:           {self.address}")
-        print(f"  Contract:         {self.config['arbitrage']}")
-        print(f"  Borrow Amount:    {self.w3.from_wei(borrow_amount, 'ether')} tokens")
-        print(f"  Min Profit:       {self.w3.from_wei(min_profit, 'ether')} tokens")
-        print(f"  Dry Run:          {'Yes' if self.dry_run else 'NO - LIVE EXECUTION'}")
-        print(f"  Database Logging: {'✓ Enabled' if self.db else '✗ Disabled'}")
-        print(f"  Routers:          {list(self.routers.keys())}")
+        print(f"  Execution Network: {self.network}")
+        print(f"  Price Oracle:      BSC Mainnet (live prices)")
+        print(f"  Wallet:            {self.address}")
+        print(f"  Contract:          {self.config['arbitrage']}")
+        print(f"  Borrow Token:      {TRADING_CONFIG['borrow_token']}")
+        print(f"  Trade Token:       {TRADING_CONFIG['trade_token']}")
+        print(f"  Borrow Amount:     {self.w3.from_wei(borrow_amount, 'ether')} tokens")
+        print(f"  Flash Loan Fee:    {FLASH_LOAN_FEE_PCT * 100}%")
+        print(f"  Gas Cost:          ${GAS_COST_USD}")
+        print(f"  Min NET Profit:    {self.w3.from_wei(min_profit, 'ether')} tokens (after all fees)")
+        print(f"  Dry Run:           {'Yes' if self.dry_run else 'NO - LIVE EXECUTION'}")
+        print(f"  Database Logging:  {'✓ Enabled' if self.db else '✗ Disabled'}")
+        print(f"  DEX Routers:       {list(self.mainnet_routers.keys())}")
         
         balance = self.get_balance()
-        print(f"  Balance:          {balance:.4f} BNB/ETH\n")
+        print(f"  Balance:           {balance:.4f} BNB/ETH\n")
         
         if not self.dry_run:
             print(f"{Colors.RED}{Colors.BOLD}⚠️  LIVE MODE - Real transactions will be sent!{Colors.END}")
@@ -506,35 +538,121 @@ class ArbitrageBot:
                 
                 opp = self.find_arbitrage(token_borrow, token_intermediate, borrow_amount)
                 
+                # Extract prices and spreads regardless of opportunity
+                timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+                prices = opp.get("prices", {}) if opp else {}
+                spreads = opp.get("spreads", {}) if opp else {}
+                prices_changed = prices != last_prices and len(prices) > 0
+                
+                # Get net profit for this scan
+                current_net_profit = opp.get("net_profit", 0) if opp else 0
+                current_gross_profit = opp.get("gross_profit", 0) if opp else 0
+                
+                # Debug: Show if prices were fetched
+                if iteration == 1 and len(prices) == 0:
+                    log("Warning: No prices fetched from DEXes", Colors.YELLOW)
+                
                 # Log to database
                 scan_id = None
-                if self.db and opp:
-                    prices = opp.get("prices", {})
-                    if len(prices) >= 2:
-                        price_values = list(prices.values())
-                        spread = abs(price_values[0] - price_values[1]) / min(price_values) * 100
-                        prices_changed = prices != last_prices
-                        
-                        scan_id = self.db.log_price_scan(
-                            pancake_price=float(price_values[0]) / 1e18,
-                            biswap_price=float(price_values[1]) / 1e18 if len(price_values) > 1 else 0,
-                            spread=spread,
-                            price_changed=prices_changed,
-                        )
-                        last_prices = prices.copy()
+                if self.db and len(prices) >= 2:
+                    price_values = list(prices.values())
+                    spread = abs(price_values[0] - price_values[1]) / min(price_values) * 100
+                    
+                    # Use net profit for database logging
+                    best_net_profit = float(current_net_profit) / 1e18 if current_net_profit else 0
+                    
+                    scan_id = self.db.log_price_scan(
+                        pancake_price=float(price_values[0]) / 1e18,
+                        biswap_price=float(price_values[1]) / 1e18 if len(price_values) > 1 else 0,
+                        spread=spread,
+                        price_changed=prices_changed,
+                        best_gross_profit=best_net_profit,  # Actually storing net profit
+                    )
                 
-                if opp and opp["gross_profit"] > min_profit:
+                # Display current prices and spreads (on every scan with prices)
+                if len(prices) > 0 and (prices_changed or iteration == 1):
+                    print(f"\n{Colors.BOLD}[{timestamp}] Update #{iteration}{Colors.END}")
+                    
+                    # Show individual DEX prices (WBNB price in BUSD)
+                    for dex_name, price in prices.items():
+                        price_display = self.w3.from_wei(price, 'ether')
+                        
+                        # Show change indicator
+                        if last_prices.get(dex_name) is not None:
+                            change = price - last_prices[dex_name]
+                            change_pct = (change / last_prices[dex_name]) * 100
+                            change_ind = f" {Colors.GREEN}↑ (+{change_pct:.4f}%){Colors.END}" if change > 0 else (
+                                f" {Colors.RED}↓ ({change_pct:.4f}%){Colors.END}" if change < 0 else ""
+                            )
+                        else:
+                            change_ind = ""
+                        
+                        print(f"  {dex_name.capitalize()}: ${price_display:.2f} per {TRADING_CONFIG['trade_token']}{change_ind}")
+                    
+                    # Show spreads between DEXes
+                    if spreads:
+                        print(f"\n  {Colors.CYAN}Spreads:{Colors.END}")
+                        for spread_key, spread_val in spreads.items():
+                            spread_color = Colors.GREEN if abs(spread_val) > 0.5 else Colors.YELLOW
+                            print(f"    {spread_key}: {spread_color}{spread_val:.4f}%{Colors.END}")
+                    
+                    # Show profit analysis for this scan (ALWAYS, even if below threshold)
+                    print(f"\n  {Colors.CYAN}Profit Analysis:{Colors.END}")
+                    if current_gross_profit > 0:
+                        gross_display = self.w3.from_wei(current_gross_profit, 'ether')
+                        flash_fee_display = self.w3.from_wei(opp.get("flash_loan_fee", 0), 'ether')
+                        gas_cost_display = self.w3.from_wei(opp.get("gas_cost", 0), 'ether')
+                        net_display = self.w3.from_wei(current_net_profit, 'ether')
+                        
+                        print(f"    Gross Profit:     {Colors.YELLOW}{gross_display:.6f} {TRADING_CONFIG['borrow_token']}{Colors.END}")
+                        print(f"    Flash Loan Fee:   {Colors.RED}-{flash_fee_display:.6f} {TRADING_CONFIG['borrow_token']}{Colors.END}")
+                        print(f"    Gas Cost:         {Colors.RED}-{gas_cost_display:.6f} {TRADING_CONFIG['borrow_token']}{Colors.END}")
+                        
+                        # Color-code net profit based on whether it meets threshold
+                        if current_net_profit >= min_profit:
+                            profit_color = Colors.GREEN
+                            profit_status = "✓ PROFITABLE"
+                        elif current_net_profit > 0:
+                            profit_color = Colors.YELLOW
+                            profit_status = "⚠ Below threshold"
+                        else:
+                            profit_color = Colors.RED
+                            profit_status = "✗ Unprofitable"
+                        
+                        print(f"    Net Profit:       {profit_color}{net_display:.6f} {TRADING_CONFIG['borrow_token']} {profit_status}{Colors.END}")
+                    else:
+                        print(f"    {Colors.RED}No profitable path found{Colors.END}")
+                    
+                    if scan_id:
+                        print(f"\n  {Colors.CYAN}DB Scan ID: {scan_id}{Colors.END}")
+                    
+                    # Update last prices
+                    last_prices = prices.copy()
+                
+                # Check for PROFITABLE opportunity (net profit >= threshold)
+                if opp and current_net_profit >= min_profit:
                     opportunities_found += 1
                     
                     print(f"\n{Colors.GREEN}{Colors.BOLD}🔥 ARBITRAGE OPPORTUNITY #{opportunities_found}{Colors.END}")
                     print(f"{Colors.CYAN}{'=' * 70}{Colors.END}")
-                    print(f"  Buy Router:   {opp['buy_router']} (V{'3' if opp['buy_router_version'] else '2'})")
-                    print(f"  Sell Router:  {opp['sell_router']} (V{'3' if opp['sell_router_version'] else '2'})")
-                    print(f"  Intermediate: {self.w3.from_wei(opp['intermediate_amount'], 'ether'):.6f} tokens")
-                    print(f"  Final:        {self.w3.from_wei(opp['final_amount'], 'ether'):.6f} tokens")
-                    print(f"  Gross Profit: {Colors.GREEN}{self.w3.from_wei(opp['gross_profit'], 'ether'):.6f} tokens{Colors.END}")
-                    if self.db and scan_id:
-                        print(f"  {Colors.CYAN}DB Scan ID:   {scan_id}{Colors.END}")
+                    print(f"  Strategy:     Buy on {Colors.BOLD}{opp['buy_router'].capitalize()}{Colors.END}, "
+                          f"Sell on {Colors.BOLD}{opp['sell_router'].capitalize()}{Colors.END}")
+                    print(f"  Borrow:       {self.w3.from_wei(opp['borrow_amount'], 'ether'):.6f} {TRADING_CONFIG['borrow_token']}")
+                    print(f"  Intermediate: {self.w3.from_wei(opp['intermediate_amount'], 'ether'):.6f} {TRADING_CONFIG['trade_token']}")
+                    print(f"  Final:        {self.w3.from_wei(opp['final_amount'], 'ether'):.6f} {TRADING_CONFIG['borrow_token']}")
+                    print(f"\n  {Colors.CYAN}Profit Breakdown:{Colors.END}")
+                    print(f"    Gross Profit:  {Colors.YELLOW}{self.w3.from_wei(opp['gross_profit'], 'ether'):.6f} {TRADING_CONFIG['borrow_token']}{Colors.END}")
+                    print(f"    Flash Fee:     {Colors.RED}-{self.w3.from_wei(opp['flash_loan_fee'], 'ether'):.6f} {TRADING_CONFIG['borrow_token']}{Colors.END}")
+                    print(f"    Gas Cost:      {Colors.RED}-{self.w3.from_wei(opp['gas_cost'], 'ether'):.6f} {TRADING_CONFIG['borrow_token']}{Colors.END}")
+                    print(f"    Net Profit:    {Colors.GREEN}{self.w3.from_wei(opp['net_profit'], 'ether'):.6f} {TRADING_CONFIG['borrow_token']}{Colors.END}")
+                    
+                    # Show opportunity spread
+                    buy_price = opp['prices'].get(opp['buy_router'], 0)
+                    sell_price = opp['prices'].get(opp['sell_router'], 0)
+                    if buy_price and sell_price:
+                        opp_spread = ((sell_price - buy_price) / buy_price) * 100
+                        print(f"    Spread:        {Colors.YELLOW}{opp_spread:.4f}%{Colors.END}")
+                    
                     print(f"{Colors.CYAN}{'=' * 70}{Colors.END}")
                     
                     # Log opportunity to database
@@ -544,47 +662,37 @@ class ArbitrageBot:
                             "sell_dex": opp["sell_router"],
                             "buy_price": float(opp["borrow_amount"]) / 1e18,
                             "sell_price": float(opp["final_amount"]) / 1e18,
-                            "net": float(opp["gross_profit"]) / 1e18,
+                            "net": float(opp["net_profit"]) / 1e18,  # Store net profit
                             "flash_loan_amount": float(borrow_amount) / 1e18,
                         }
                         self.db.log_arbitrage_opportunity(scan_id, db_opp)
                         log(f"Opportunity logged to database", Colors.CYAN)
                     
-                    # Execute
-                    tx_hash = None
-                    if opp["buy_router_version"] == opp["sell_router_version"] == 0:
-                        tx_hash = self.execute_arbitrage_v2(
-                            token_borrow,
-                            borrow_amount,
-                            True,
-                            opp["buy_router_address"],
-                            opp["sell_router_address"],
-                            opp["path_buy"],
-                            opp["path_sell"],
-                            min_profit,
-                        )
-                    else:
-                        tx_hash = self.execute_arbitrage_mixed(
-                            token_borrow,
-                            borrow_amount,
-                            True,
-                            opp["buy_router_address"],
-                            opp["buy_router_version"],
-                            opp["sell_router_address"],
-                            opp["sell_router_version"],
-                            opp["path_buy"],
-                            opp["path_sell"],
-                            3000 if opp["buy_router_version"] == 1 else 0,
-                            3000 if opp["sell_router_version"] == 1 else 0,
-                            min_profit,
-                        )
+                    # Execute V2 arbitrage
+                    tx_hash = self.execute_arbitrage_v2(
+                        token_borrow,
+                        borrow_amount,
+                        True,
+                        opp["buy_router_address"],
+                        opp["sell_router_address"],
+                        opp["path_buy"],
+                        opp["path_sell"],
+                        min_profit,
+                    )
                     
                     if tx_hash and tx_hash != "DRY_RUN":
                         log(f"Transaction: {tx_hash}", Colors.GREEN)
-                else:
-                    timestamp = datetime.now().strftime("%H:%M:%S")
+                elif not prices_changed and iteration > 1:
+                    # Compact display when no changes
                     db_indicator = f" [DB:{scan_id}]" if (self.db and scan_id) else ""
-                    print(f"[{timestamp}] Scan #{iteration} - No opportunity{db_indicator}", end="\r")
+                    net_profit_display = self.w3.from_wei(current_net_profit, 'ether') if current_net_profit else 0
+                    print(f"[{timestamp}] Monitoring... Net: {net_profit_display:.6f}{db_indicator}", end="\r")
+                else:
+                    # Price changed but no opportunity above threshold
+                    if current_net_profit > 0:
+                        print(f"  {Colors.YELLOW}Below threshold - Net profit too low{Colors.END}")
+                    else:
+                        print(f"  {Colors.YELLOW}No profitable path{Colors.END}")
                 
                 time.sleep(interval)
                 
@@ -606,9 +714,21 @@ class ArbitrageBot:
                     print(f"{Colors.CYAN}{'=' * 70}{Colors.END}")
                     print(f"  Total Scans:          {stats.get('total_scans', 0)}")
                     print(f"  Price Changes:        {stats.get('price_changes', 0)}")
-                    print(f"  Opportunities Found:  {stats.get('total_opportunities', 0)}")
+                    print(f"  Scans with Profit:    {stats.get('scans_with_profit', 0)}")
+                    print(f"\n  {Colors.CYAN}Spread Analysis:{Colors.END}")
+                    print(f"    Average:            {float(stats.get('avg_spread', 0)):.4f}%")
+                    print(f"    Maximum:            {float(stats.get('max_spread', 0)):.4f}%")
+                    print(f"    Minimum:            {float(stats.get('min_spread', 0)):.4f}%")
+                    print(f"\n  {Colors.CYAN}Net Profit Analysis (all scans):{Colors.END}")
+                    if stats.get('avg_gross_profit'):
+                        print(f"    Average:            {float(stats.get('avg_gross_profit', 0)):.6f} {TRADING_CONFIG['borrow_token']}")
+                        print(f"    Maximum:            {float(stats.get('max_gross_profit', 0)):.6f} {TRADING_CONFIG['borrow_token']}")
+                    print(f"\n  {Colors.CYAN}Profitable Opportunities:{Colors.END}")
+                    print(f"    Found:              {stats.get('total_opportunities', 0)}")
                     if stats.get('total_potential_profit'):
-                        print(f"  Total Potential:      {float(stats.get('total_potential_profit', 0)):.4f} tokens")
+                        print(f"    Total Potential:    {float(stats.get('total_potential_profit', 0)):.4f} {TRADING_CONFIG['borrow_token']}")
+                        print(f"    Avg Net Profit:     {float(stats.get('avg_profit', 0)):.4f} {TRADING_CONFIG['borrow_token']}")
+                        print(f"    Max Net Profit:     {float(stats.get('max_profit', 0)):.4f} {TRADING_CONFIG['borrow_token']}")
                     print(f"{Colors.CYAN}{'=' * 70}{Colors.END}\n")
                 
                 self.db.close()
@@ -619,7 +739,7 @@ class ArbitrageBot:
 def main():
     print(f"\n{Colors.CYAN}{Colors.BOLD}{'=' * 70}")
     print("FLASH LOAN ARBITRAGE BOT")
-    print("Live Execution Version with Database Logging")
+    print("Live Execution with Net Profit Calculation (V2 Only)")
     print(f"{'=' * 70}{Colors.END}\n")
     
     if not WEB3_AVAILABLE:
@@ -642,19 +762,28 @@ def main():
     
     bot = ArbitrageBot(private_key, network, dry_run)
     
-    # Configure tokens
+    # Get token addresses from TRADING_CONFIG
+    borrow_token_name = TRADING_CONFIG["borrow_token"]
+    trade_token_name = TRADING_CONFIG["trade_token"]
+    
     tokens = bot.tokens
-    token_borrow = tokens.get("WBNB") or list(tokens.values())[0]
-    token_intermediate = tokens.get("BUSD") or list(tokens.values())[1]
+    token_borrow = tokens.get(borrow_token_name)
+    token_intermediate = tokens.get(trade_token_name)
     
-    log(f"Token Borrow: {token_borrow}", Colors.CYAN)
-    log(f"Token Intermediate: {token_intermediate}", Colors.CYAN)
+    if not token_borrow or not token_intermediate:
+        print(f"{Colors.RED}Error: Token configuration missing{Colors.END}")
+        print(f"Borrow Token ({borrow_token_name}): {token_borrow}")
+        print(f"Trade Token ({trade_token_name}): {token_intermediate}")
+        return
     
-    # Borrow 10 tokens, min profit 0.01 tokens
-    borrow_amount = bot.w3.to_wei(10, "ether")
-    min_profit = bot.w3.to_wei(0.01, "ether")
+    log(f"Token Borrow ({borrow_token_name}): {token_borrow}", Colors.CYAN)
+    log(f"Token Trade ({trade_token_name}): {token_intermediate}", Colors.CYAN)
     
-    bot.run(token_borrow, token_intermediate, borrow_amount, min_profit)
+    # Use amounts from TRADING_CONFIG
+    borrow_amount = bot.w3.to_wei(TRADING_CONFIG["borrow_amount"], "ether")
+    min_profit = bot.w3.to_wei(TRADING_CONFIG["min_profit"], "ether")
+    
+    bot.run(token_borrow, token_intermediate, borrow_amount, min_profit,interval=10)
 
 
 if __name__ == "__main__":
