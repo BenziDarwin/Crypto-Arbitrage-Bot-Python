@@ -1,3 +1,5 @@
 .env
 
 .env.live
+
+/__pycache__
