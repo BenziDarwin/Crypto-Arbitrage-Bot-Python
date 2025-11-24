@@ -16,7 +16,7 @@ except:
 
 print("✓ Connected to BSC testnet\n")
 
-ARBITRAGE = "0x9ee47bba211192011c35d65e8c6a7e2ac8458ae1"
+ARBITRAGE = "0x42239b27c3ef6584c7299c1f77373629e41d0bf6"
 
 # Minimal ABI for setDodoFeeRate
 ABI = [
