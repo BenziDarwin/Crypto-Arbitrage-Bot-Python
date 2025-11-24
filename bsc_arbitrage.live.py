@@ -176,10 +176,10 @@ class ArbitrageBot:
         # For testnet, also load mock router ABI
         if "testnet" in network:
             try:
-                self.router_mock_abi = load_abi("RouterV2.json")
+                self.router_mock_abi = load_abi("RouterV2Mock.json")
                 log("ABIs loaded (including mock router)", Colors.GREEN)
             except:
-                log("⚠️  RouterV2.json not found - dynamic config disabled", Colors.YELLOW)
+                log("⚠️  RouterV2Mock.json not found - dynamic config disabled", Colors.YELLOW)
                 self.router_mock_abi = None
         else:
             log("ABIs loaded", Colors.GREEN)
@@ -526,56 +526,56 @@ class ArbitrageBot:
             
             # Simulate transaction first to catch reverts early
             log("🔍 Simulating transaction...", Colors.BLUE)
-            # try:
-            #     self.w3.eth.call(tx)
-            #     log("   ✓ Simulation passed", Colors.GREEN)
-            # except Exception as sim_error:
-            #     print(sim_error)
-            #     error_msg = str(sim_error)
-            #     log(f"❌ Simulation FAILED - Would revert on-chain!", Colors.RED)
+            try:
+                self.w3.eth.call(tx)
+                log("   ✓ Simulation passed", Colors.GREEN)
+            except Exception as sim_error:
+                error_msg = str(sim_error)
+                log(f"❌ Simulation FAILED - Would revert on-chain!", Colors.RED)
                 
-            #     # Decode custom errors from your smart contract
-            #     # Error signatures (first 4 bytes of keccak256 hash)
-            #     ERROR_SIGNATURES = {
-            #         "0x82b42900": "Unauthorized", 
-            #         "0x6bb6d469": "InsufficientProfit",
-            #         "0x386691c6": "InvalidAmount",
-            #         "0x8baa579f": "InvalidToken",
-            #     }
+                # Decode custom errors from your smart contract
+                # Error signatures (first 4 bytes of keccak256 hash)
+                ERROR_SIGNATURES = {
+                    "0xe450d38c": "InvalidCallback",
+                    "0x82b42900": "Unauthorized", 
+                    "0x6bb6d469": "InsufficientProfit",
+                    "0x386691c6": "InvalidAmount",
+                    "0x8baa579f": "InvalidToken",
+                }
                 
-            #     # Check if it's a custom error
-            #     decoded_error = None
-            #     for sig, error_name in ERROR_SIGNATURES.items():
-            #         if sig in error_msg:
-            #             decoded_error = error_name
-            #             break
+                # Check if it's a custom error
+                decoded_error = None
+                for sig, error_name in ERROR_SIGNATURES.items():
+                    if sig in error_msg:
+                        decoded_error = error_name
+                        break
                 
-            #     if decoded_error == "InsufficientProfit":
-            #         log(f"   Reason: InsufficientProfit", Colors.YELLOW)
-            #         log(f"   → Actual profit < minProfit ({self.w3.from_wei(min_profit, 'ether')} {TRADING_CONFIG['borrow_token']})", Colors.YELLOW)
-            #         log(f"   → Router outputs may not match expected prices", Colors.YELLOW)
-            #     elif decoded_error == "InvalidCallback":
-            #         log(f"   Reason: InvalidCallback", Colors.YELLOW)
-            #         log(f"   → Flash loan callback validation failed", Colors.YELLOW)
-            #     elif decoded_error == "Unauthorized":
-            #         log(f"   Reason: Unauthorized", Colors.YELLOW)
-            #         log(f"   → Only contract owner can execute", Colors.YELLOW)
-            #     elif decoded_error == "InvalidAmount":
-            #         log(f"   Reason: InvalidAmount", Colors.YELLOW)
-            #         log(f"   → Borrow amount is 0 or invalid", Colors.YELLOW)
-            #     elif "execution reverted" in error_msg.lower():
-            #         # Generic revert
-            #         if ":" in error_msg:
-            #             reason = error_msg.split(":")[-1].strip()[:200]
-            #             log(f"   Reason: {reason}", Colors.YELLOW)
-            #         else:
-            #             log(f"   Reason: Generic revert", Colors.YELLOW)
-            #     else:
-            #         # Unknown error
-            #         log(f"   Reason: {error_msg[:200]}...", Colors.YELLOW)
+                if decoded_error == "InsufficientProfit":
+                    log(f"   Reason: InsufficientProfit", Colors.YELLOW)
+                    log(f"   → Actual profit < minProfit ({self.w3.from_wei(min_profit, 'ether')} {TRADING_CONFIG['borrow_token']})", Colors.YELLOW)
+                    log(f"   → Router outputs may not match expected prices", Colors.YELLOW)
+                elif decoded_error == "InvalidCallback":
+                    log(f"   Reason: InvalidCallback", Colors.YELLOW)
+                    log(f"   → Flash loan callback validation failed", Colors.YELLOW)
+                elif decoded_error == "Unauthorized":
+                    log(f"   Reason: Unauthorized", Colors.YELLOW)
+                    log(f"   → Only contract owner can execute", Colors.YELLOW)
+                elif decoded_error == "InvalidAmount":
+                    log(f"   Reason: InvalidAmount", Colors.YELLOW)
+                    log(f"   → Borrow amount is 0 or invalid", Colors.YELLOW)
+                elif "execution reverted" in error_msg.lower():
+                    # Generic revert
+                    if ":" in error_msg:
+                        reason = error_msg.split(":")[-1].strip()[:200]
+                        log(f"   Reason: {reason}", Colors.YELLOW)
+                    else:
+                        log(f"   Reason: Generic revert", Colors.YELLOW)
+                else:
+                    # Unknown error
+                    log(f"   Reason: {error_msg[:200]}...", Colors.YELLOW)
                 
-            #     log(f"   💡 Transaction not sent - no gas wasted!", Colors.CYAN)
-            #     return None
+                log(f"   💡 Transaction not sent - no gas wasted!", Colors.CYAN)
+                return None
             
             log("✍️  Signing transaction...", Colors.BLUE)
             signed = self.w3.eth.account.sign_transaction(tx, self.private_key)
@@ -686,6 +686,27 @@ class ArbitrageBot:
                 profits = result.get("profits", {})
                 opp = result.get("opportunity")
                 
+                # Log to database
+                scan_id = None
+                prices_changed = prices != {}
+                if self.db and len(prices) >= 2:
+                    price_list = list(prices.values())
+                    overall_spread = abs(price_list[0] - price_list[1]) / min(price_list) * 100
+                    
+                    # Calculate net profit for this scan
+                    best_net_profit = 0
+                    if opp:
+                        net_profit_value = opp.get('estimated_net_profit', 0)
+                        best_net_profit = float(net_profit_value) / 1e18 if net_profit_value >= 0 else -float(abs(net_profit_value)) / 1e18
+                    
+                    scan_id = self.db.log_price_scan(
+                        pancake_price=float(price_list[0]),
+                        biswap_price=float(price_list[1]) if len(price_list) > 1 else 0,
+                        spread=overall_spread,
+                        price_changed=prices_changed,
+                        best_gross_profit=best_net_profit,
+                    )
+                
                 # Display (matching demo style)
                 if len(prices) >= 2:
                     print(f"\n{Colors.BOLD}[{timestamp}] Update #{iteration}{Colors.END}")
@@ -700,6 +721,9 @@ class ArbitrageBot:
                         overall_spread = abs(price_list[0] - price_list[1]) / min(price_list) * 100
                         print(f"  Spread:      {overall_spread:.4f}%")
                     
+                    if scan_id:
+                        print(f"  DB Scan ID: {scan_id}")
+                    
                     # Show if opportunity exists
                     if opp:
                         opportunities_found += 1
@@ -713,6 +737,19 @@ class ArbitrageBot:
                         print(f"\n{Colors.GREEN}{Colors.BOLD}🔥 OPPORTUNITY #{opportunities_found}!{Colors.END}")
                         print(f"  Strategy: Buy {opp['buy_router'].capitalize()} → Sell {opp['sell_router'].capitalize()}")
                         print(f"  Net Profit: {Colors.GREEN}${net_profit_display:.4f}{Colors.END}")
+                        
+                        # Log opportunity to database
+                        if self.db and scan_id:
+                            db_opp = {
+                                "buy_dex": opp["buy_router"],
+                                "sell_dex": opp["sell_router"],
+                                "buy_price": float(opp["buy_price"]),
+                                "sell_price": float(opp["sell_price"]),
+                                "net": net_profit_display,
+                                "flash_loan_amount": float(TRADING_CONFIG["borrow_amount"]),
+                            }
+                            self.db.log_arbitrage_opportunity(scan_id, db_opp)
+                            log(f"Opportunity logged to database", Colors.CYAN)
                         
                         # Execute via smart contract
                         log("⚡ Executing arbitrage...", Colors.BOLD)
@@ -751,6 +788,32 @@ class ArbitrageBot:
             if self.db and self.session_id:
                 self.db.end_session(self.session_id, iteration, opportunities_found)
                 self.db.close()
+                log(f"Database session ended", Colors.CYAN)
+                
+                # Show statistics
+                stats = self.db.get_statistics(hours=24)
+                if stats:
+                    print(f"\n{Colors.CYAN}{'=' * 80}{Colors.END}")
+                    print(f"{Colors.BOLD}📊 SESSION STATISTICS:{Colors.END}")
+                    print(f"{Colors.CYAN}{'=' * 80}{Colors.END}")
+                    print(f"  Total Scans:          {stats.get('total_scans', 0)}")
+                    print(f"  Price Changes:        {stats.get('price_changes', 0)}")
+                    print(f"  Scans with Profit:    {stats.get('scans_with_profit', 0)}")
+                    print(f"\n  {Colors.CYAN}Spread Analysis:{Colors.END}")
+                    print(f"    Average:            {float(stats.get('avg_spread', 0)):.4f}%")
+                    print(f"    Maximum:            {float(stats.get('max_spread', 0)):.4f}%")
+                    print(f"    Minimum:            {float(stats.get('min_spread', 0)):.4f}%")
+                    print(f"\n  {Colors.CYAN}Net Profit Analysis:{Colors.END}")
+                    if stats.get('avg_gross_profit'):
+                        print(f"    Average:            {float(stats.get('avg_gross_profit', 0)):.6f} {TRADING_CONFIG['borrow_token']}")
+                        print(f"    Maximum:            {float(stats.get('max_gross_profit', 0)):.6f} {TRADING_CONFIG['borrow_token']}")
+                    print(f"\n  {Colors.CYAN}Profitable Opportunities:{Colors.END}")
+                    print(f"    Found:              {stats.get('total_opportunities', 0)}")
+                    if stats.get('total_potential_profit'):
+                        print(f"    Total Potential:    {float(stats.get('total_potential_profit', 0)):.4f} {TRADING_CONFIG['borrow_token']}")
+                        print(f"    Avg Net Profit:     {float(stats.get('avg_profit', 0)):.4f} {TRADING_CONFIG['borrow_token']}")
+                        print(f"    Max Net Profit:     {float(stats.get('max_profit', 0)):.4f} {TRADING_CONFIG['borrow_token']}")
+                    print(f"{Colors.CYAN}{'=' * 80}{Colors.END}\n")
             
             log("Goodbye! 👋", Colors.YELLOW)
 
