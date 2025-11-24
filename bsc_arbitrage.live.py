@@ -32,7 +32,7 @@ TRADING_CONFIG = {
     "trade_token": "WBNB",       # Intermediate token
     "borrow_amount": 1000,       # Amount to borrow (whole tokens)
     "min_profit": 0.01,          # Minimum profit in BUSD to execute (after all fees)
-    "min_spread_pct": 0.3,       # Minimum spread % to even attempt (pre-filter)
+    "min_spread_pct": 0.37,       # Minimum spread % to even attempt (pre-filter)
     "flash_loan_fee": 0.0,       # DODO flash loan fee (0% = free, 0.0009 = 0.09%)
     "gas_cost_usd": 0.08,        # Estimated gas cost in USD
 }
