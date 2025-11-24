@@ -176,10 +176,10 @@ class ArbitrageBot:
         # For testnet, also load mock router ABI
         if "testnet" in network:
             try:
-                self.router_mock_abi = load_abi("RouterV2Mock.json")
+                self.router_mock_abi = load_abi("RouterV2.json")
                 log("ABIs loaded (including mock router)", Colors.GREEN)
             except:
-                log("⚠️  RouterV2Mock.json not found - dynamic config disabled", Colors.YELLOW)
+                log("⚠️  RouterV2.json not found - dynamic config disabled", Colors.YELLOW)
                 self.router_mock_abi = None
         else:
             log("ABIs loaded", Colors.GREEN)
