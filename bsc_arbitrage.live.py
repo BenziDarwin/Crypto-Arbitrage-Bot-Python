@@ -57,14 +57,14 @@ NETWORKS = {
 CONTRACT_CONFIG = {
     "bsc_mainnet": {
         "arbitrage": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
-        "dodo_pool": "0x0fe261aeE0d1C4DFdDee4102E82Dd425999065F4",
+        "dodo_pool": "0x6098A5638d8D7e9Ed2f952d35B2b67c34EC6B476",
         "v2_routers": {
             "pancakeswap": "0x10ED43C718714eb63d5aA57B78B54704E256024E",
             "biswap": "0x3a6d8cA21D1CF76F653A67577FA0D27453350dD8",
         },
         "tokens": {
             "WBNB": "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
-            "BUSD": "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56",
+            "USDC": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
             "USDT": "0x55d398326f99059fF775485246999027B3197955",
         },
     },
