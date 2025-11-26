@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 load_dotenv(".env.live")
 
 # Connect
-RPC = "https://data-seed-prebsc-1-s1.binance.org:8545"
+RPC = "https://bsc-dataseed1.binance.org"
 w3 = Web3(Web3.HTTPProvider(RPC))
 
 try:
@@ -16,7 +16,7 @@ except:
 
 print("✓ Connected to BSC testnet\n")
 
-ARBITRAGE = "0x42239b27c3ef6584c7299c1f77373629e41d0bf6"
+ARBITRAGE = "0x02a3e84955b04069a6a75595b421358e0e9f3992"
 
 # Minimal ABI for setDodoFeeRate
 ABI = [
